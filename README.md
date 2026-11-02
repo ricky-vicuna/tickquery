@@ -79,8 +79,14 @@ finally:
 - `Query(session, source)`: reference a table variable in the connected session.
 - `col(name)`, `count()`: build column expressions and `count(*)`.
 - Expressions: comparisons, `&`, `|`, `alias`, `first`, `last`, `sum`, `mean`,
-  and `bucket(every, label="left" | "right")`.
-- Queries: `filter`, `select`, ascending `sort`, `head`, `group_by(...).agg(...)`.
+  `max`, `min`, and `bucket(every, label="left" | "right")`.
+- Queries: `filter`, `select`, `with_columns`, ascending `sort`, `head`,
+  `group_by(...).agg(...)`.
+- `reference(tables)`: run the same plan locally on Polars frames (keyed by
+  source table name) and get a `pl.LazyFrame`. This is the oracle for tests,
+  not a fast path.
+- `tickquery.testing.assert_same_result(actual, expected, sort_by=...)`: compare a
+  DolphinDB result with a reference result, ignoring row order and dtype width.
 - `explain()`: inspect the generated server script without running it.
 - `cache(name)`: execute and retain a named session-local table; reusing a name
   overwrites it. The caller owns the cache lifetime.
@@ -101,7 +107,9 @@ Buckets are left-closed/right-open. `label="right"` shifts the label to the
 bucket's right edge; it does not change membership. Empty buckets are not filled.
 Supported interval units: `ns`, `us`, `ms`, `s`, `m`, `H`.
 
-Sort before `last()` and include a sequence column when timestamps can tie.
+`first()`/`last()` require a `sort()` earlier in the plan (and not undone by a
+later `group_by`); otherwise `agg()` raises. Include a sequence column in the
+sort when timestamps can tie.
 Naive Python datetimes must already follow the dataset's timezone convention;
 timezone-aware inputs are rejected. Schema validation is delegated to DolphinDB.
 The Polars result path converts the SDK's Pandas result locally.
@@ -154,15 +162,24 @@ Contracts:
 - `where` is an alias for `filter`.
 - `having` filters **named output columns after aggregation**. It generates an
   outer `where` over the materialized aggregation, not a literal SQL `HAVING`
-  clause. Use `col("volume") > 100`, not `col("size").sum() > 100`. It can also
-  filter any other intermediate result; this POC does not validate aggregate scope.
+  clause. Use `col("volume") > 100`; `col("size").sum() > 100` raises, in
+  `having` and `where` alike.
+- `agg` only accepts aggregate expressions; group keys cannot be aggregates;
+  `sort` rejects aliased or aggregate expressions.
 - `left_join` and `right_join` accept one or more same-named equality keys.
   Duplicate keys produce all matches. Right join uses a reversed left join, so
   output column order starts with the original right input.
 - `asof_join` matches on `right[on] <= left[on]`, with optional equality keys in
-  `by`. It sorts the transformed right input by `by` and `on` automatically.
-  There is no forward/nearest mode or tolerance. Avoid duplicate right timestamps
-  within a group when a deterministic choice is needed.
+  `by`. It sorts the transformed right input by `by`, `on` and `tie_break`
+  automatically. There is no forward/nearest mode or tolerance.
+  - `strict=True` matches `right[on] < left[on]`: a row stamped exactly at the
+    left time is not visible yet. Use it for snapshots at bar close. On
+    DolphinDB this adds one tick to the right time before `aj` (exact for
+    integer-tick temporal types).
+  - `matched="name"` keeps the matched right time as a column, so staleness can
+    be checked; it is null when nothing matched.
+  - `tie_break=["seq"]` orders right rows that share a timestamp; the last one
+    wins. Without it, which duplicate wins is not defined.
 - Both inputs must use the same session. Filter before joining large histories:
   each right-hand plan is materialized on the server. All generated temporary
   variables, including nested join branches, are cleaned up after execution.
@@ -172,28 +189,70 @@ Contracts:
 - Native DolphinDB null behavior is retained: an unmatched STRING value is the
   empty string, while a missing DOUBLE becomes NaN in Pandas / null in Polars.
 
-### Daily tests (no server)
+Known differences of the Polars reference from DolphinDB (representation only):
+unmatched strings are null instead of `""`; counts are UInt32; overlapping
+non-key join columns get a `_right` suffix instead of a table-name prefix;
+`asof_join` drops the right join-time column (use `matched=`).
 
-From this package's repository root, after installing the package:
+### How correctness is checked
+
+Researchers should not need to read DolphinDB scripts to trust a result. Each
+layer answers a different question:
+
+| Layer | Question | File | Needs |
+|---|---|---|---|
+| Compiler | Is the script what we intend, and are mistakes rejected? | `test_operations.py` | nothing |
+| Reference | Does the Polars backend give the hand-written answers? | `test_reference.py` | nothing |
+| Market data | On real ticks, does each plan mean what it says? | `test_market_data.py` | fixtures |
+| Semantics | Does DolphinDB give the hand-written answers? | `test_semantics.py` | server |
+| Differential | Does DolphinDB give the reference answer on real ticks? | `test_differential.py` | server + fixtures |
+
+The market-data tests state invariants a researcher can read and challenge:
+volume and trade count are conserved by 1s bars; bars cover only continuous
+trading; open/close are the first/last trade by (exchange time, receive time,
+feed order); top-of-book at bar close never uses a snapshot available at or
+after the bar close, and matches a brute-force search. Expected answers are
+computed independently of the plan under test.
+
+The queries themselves live in `tests/plans.py` and run unchanged on both
+backends.
+
+Some choices are spec, not code, and no test can decide them. They are written
+down in `tests/fixtures.py` and `tests/plans.py` for review, for example: when an
+SSE depth snapshot with a whole-second timestamp becomes visible (here: one
+second later), and whether lunch-break snapshots may be used at 13:00.
+
+### Market-data fixtures
+
+Raw vendor data is not committed (`tests/data/` is git-ignored). Build it from
+raw SSE/SZSE tick CSVs:
 
 ```bash
-uv run python -m unittest discover -s tests -p 'test_operations.py' -v
+make fixtures RAW="20261030-Stock-0.csv 20261030-Stock-1.csv 20261030-Stock-60.csv"
 ```
 
-Nine tests cover where/group/count/sum/having, each join type, transformed join
-inputs, ordering, expression serialization, invalid joins, and execution cleanup.
-Each expected plan is written explicitly. A small recording session tests Python
-behavior; it does not pretend to execute SQL.
+`tests/fixtures.py` documents and fixes the raw-data traps: venue-specific
+exchange-time formats (SSE has no date and no leading zero before 10:00), SZSE
+depth prices scaled by 100, whole-second SSE depth stamps, and phase codes that
+do not mark the lunch break. Without fixtures the market-data tests skip;
+`TICKQUERY_FIXTURES` points them at another directory.
+
+### Daily tests (no server)
+
+```bash
+make test
+```
 
 ### Optional semantic checks (test server)
 
 ```bash
 uv sync --extra dolphindb
 export DDB_PASSWORD='YOUR_TEST_PASSWORD'
-uv run python -m unittest discover -s tests -v
+make test-integration
 ```
 
-Three additional tests create tiny session-local tables and compare results with
+`test_differential.py` uploads the fixtures as session-local tables and compares
+both plans with the reference. Three further tests create tiny session-local tables and compare results with
 hand-written expected rows. They cover duplicate/unmatched join keys, unsorted
 ASOF input, exact/prior matches, no future matches, per-symbol isolation, count,
 sum and post-aggregation filtering. No DFS table is modified. The connection is
@@ -208,8 +267,9 @@ Install uv, then run from the repository root:
 make init-dev       # Install locked dependencies and the DolphinDB client
 make check          # Ruff formatting + lint + Pyright (default make target)
 make fix            # Apply Ruff lint fixes and format Python files
-make test           # Nine unit tests, no database required
-make test-integration  # Three fixture tests; requires DDB_PASSWORD
+make test           # Compiler, reference and market-data tests; no database
+make fixtures RAW="..."  # Build tests/data from raw tick CSVs
+make test-integration  # Live semantic and differential tests; requires DDB_PASSWORD
 make freeze         # Refresh uv.lock, requirements.txt and dev.txt
 ```
 

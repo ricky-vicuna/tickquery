@@ -1,4 +1,4 @@
-.PHONY: check fix freeze init-dev test test-integration
+.PHONY: check fix fixtures freeze init-dev test test-integration
 .DEFAULT_GOAL := check
 
 init-dev:
@@ -15,12 +15,18 @@ fix:
 	uv run --locked ruff check --fix src tests
 	uv run --locked ruff format src tests
 
+# Compiler, Polars reference and (if tests/data exists) market-data invariants. No database.
 test:
-	uv run --locked python -m unittest discover -s tests -p 'test_operations.py' -v
+	uv run --locked python -m unittest discover -s tests -p 'test_[omr]*.py' -v
+
+# Build tests/data from raw tick CSVs: make fixtures RAW="a.csv b.csv"
+fixtures:
+	@test -n "$(RAW)" || (echo 'Usage: make fixtures RAW="raw1.csv raw2.csv"'; exit 1)
+	uv run --locked python tests/fixtures.py --out tests/data $(RAW)
 
 test-integration:
 	@test -n "$$DDB_PASSWORD" || (echo "Set DDB_PASSWORD to run integration tests"; exit 1)
-	uv run --locked --extra dolphindb python -m unittest discover -s tests -p 'test_semantics.py' -v
+	uv run --locked --extra dolphindb python -m unittest discover -s tests -p 'test_[sd]*.py' -v
 
 freeze:
 	@echo "Freezing dependencies..."

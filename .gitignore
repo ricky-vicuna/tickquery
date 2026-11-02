@@ -8,3 +8,6 @@ build/
 .ruff_cache/
 .mypy_cache/
 .DS_Store
+
+# Market-data fixtures (vendor data; never commit)
+tests/data/
