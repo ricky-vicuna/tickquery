@@ -206,6 +206,7 @@ layer answers a different question:
 | Market data | On real ticks, does each plan mean what it says? | `test_market_data.py` | fixtures |
 | Semantics | Does DolphinDB give the hand-written answers? | `test_semantics.py` | server |
 | Differential | Does DolphinDB give the reference answer on real ticks? | `test_differential.py` | server + fixtures |
+| Ingestion | Do ticks survive ingestion into DFS tables, and do plans on them give the reference answer? | `test_ingestion.py` | Docker/OrbStack + fixtures |
 
 The market-data tests state invariants a researcher can read and challenge:
 volume and trade count are conserved by 1s bars; bars cover only continuous
@@ -236,6 +237,21 @@ exchange-time formats (SSE has no date and no leading zero before 10:00), SZSE
 depth prices scaled by 100, whole-second SSE depth stamps, and phase codes that
 do not mark the lunch break. Without fixtures the market-data tests skip;
 `TICKQUERY_FIXTURES` points them at another directory.
+
+### Ingestion test (Docker or OrbStack)
+
+```bash
+make fixtures RAW="..."   # once
+make test-ingestion       # starts compose.test.yaml, runs, removes the container
+```
+
+It loads `tests/data` into partitioned tables in `dfs://tickquery_it` on a
+throwaway container (port 18848, image default password unless
+`DDB_TEST_PASSWORD` is set), checks that every row and value round-trips
+exactly, then runs `tests/plans.py` on the DFS tables and compares with the
+Polars reference. It refuses non-local hosts because it drops that database.
+`KEEP_DB=1` leaves the container up. On Apple Silicon the amd64 image runs under
+emulation, so expect it to be slower.
 
 ### Daily tests (no server)
 
@@ -270,6 +286,7 @@ make fix            # Apply Ruff lint fixes and format Python files
 make test           # Compiler, reference and market-data tests; no database
 make fixtures RAW="..."  # Build tests/data from raw tick CSVs
 make test-integration  # Live semantic and differential tests; requires DDB_PASSWORD
+make test-ingestion    # Ingest into a throwaway DolphinDB container, then compare
 make freeze         # Refresh uv.lock, requirements.txt and dev.txt
 ```
 
