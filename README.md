@@ -125,3 +125,104 @@ python -m pip install './tickquery-0.1.0-py3-none-any.whl[dolphindb]'
 
 The wheel contains only the package, metadata, documentation metadata, and typing
 marker, not research data, credentials, or notebooks.
+
+## Operation functions and tests
+
+Functions in `tickquery.operations` accept the current query as their first
+argument. Each call adds a transformation; execution order follows call order.
+The equivalent Query methods remain available.
+
+```python
+from tickquery import Query, col, count
+from tickquery.operations import where, group_by, agg, having, left_join, asof_join
+
+trades = Query(session, "trades")
+positive = where(trades, col("trade_quantity") > 0)
+grouped = group_by(positive, "security_id")
+totals = agg(grouped, events=count(), volume=col("trade_quantity").sum())
+large = having(totals, col("volume") >= 100)
+df = large.collect()
+
+enriched = left_join(trades, Query(session, "instruments"), on="security_id")
+aligned = asof_join(
+    trades, Query(session, "quotes"), on="recv_dt", by=["security_id"],
+)
+```
+
+Contracts:
+
+- `where` is an alias for `filter`.
+- `having` filters **named output columns after aggregation**. It generates an
+  outer `where` over the materialized aggregation, not a literal SQL `HAVING`
+  clause. Use `col("volume") > 100`, not `col("size").sum() > 100`. It can also
+  filter any other intermediate result; this POC does not validate aggregate scope.
+- `left_join` and `right_join` accept one or more same-named equality keys.
+  Duplicate keys produce all matches. Right join uses a reversed left join, so
+  output column order starts with the original right input.
+- `asof_join` matches on `right[on] <= left[on]`, with optional equality keys in
+  `by`. It sorts the transformed right input by `by` and `on` automatically.
+  There is no forward/nearest mode or tolerance. Avoid duplicate right timestamps
+  within a group when a deterministic choice is needed.
+- Both inputs must use the same session. Filter before joining large histories:
+  each right-hand plan is materialized on the server. All generated temporary
+  variables, including nested join branches, are cleaned up after execution.
+- Join keys must have the same names on both sides. Alias overlapping non-key
+  columns before joining and select explicit outputs; automatic suffix naming is
+  delegated to DolphinDB and may include generated temporary-table names.
+- Native DolphinDB null behavior is retained: an unmatched STRING value is the
+  empty string, while a missing DOUBLE becomes NaN in Pandas / null in Polars.
+
+### Daily tests (no server)
+
+From this package's repository root, after installing the package:
+
+```bash
+uv run python -m unittest discover -s tests -p 'test_operations.py' -v
+```
+
+Nine tests cover where/group/count/sum/having, each join type, transformed join
+inputs, ordering, expression serialization, invalid joins, and execution cleanup.
+Each expected plan is written explicitly. A small recording session tests Python
+behavior; it does not pretend to execute SQL.
+
+### Optional semantic checks (test server)
+
+```bash
+uv sync --extra dolphindb
+export DDB_PASSWORD='YOUR_TEST_PASSWORD'
+uv run python -m unittest discover -s tests -v
+```
+
+Three additional tests create tiny session-local tables and compare results with
+hand-written expected rows. They cover duplicate/unmatched join keys, unsorted
+ASOF input, exact/prior matches, no future matches, per-symbol isolation, count,
+sum and post-aggregation filtering. No DFS table is modified. The connection is
+closed after every test. Without `DDB_PASSWORD` these tests skip; defaults are
+`DDB_HOST=localhost`, `DDB_PORT=8849`, `DDB_USER=admin`.
+
+## Development workflow
+
+Install uv, then run from the repository root:
+
+```bash
+make init-dev       # Install locked dependencies and the DolphinDB client
+make check          # Ruff formatting + lint + Pyright (default make target)
+make fix            # Apply Ruff lint fixes and format Python files
+make test           # Nine unit tests, no database required
+make test-integration  # Three fixture tests; requires DDB_PASSWORD
+make freeze         # Refresh uv.lock, requirements.txt and dev.txt
+```
+
+`make test-integration` fails early when credentials are missing, rather than
+reporting a successful run of skipped tests. Export credentials in your shell;
+do not put them in the Makefile or commit them.
+
+GitHub Actions runs `make check`, `make test`, and a package build on pull requests
+and pushes to `main`. Integration tests run locally against the test server;
+GitHub-hosted runners cannot reach a developer's localhost DolphinDB instance.
+Configure the **Ruff, Pyright and unit tests** check as required in GitHub branch
+protection if merges must be blocked on failures.
+
+The Makefile uses uv's locked environment. `requirements.txt` contains runtime
+dependencies and `dev.txt` contains development tools only. They are generated
+exports; update `pyproject.toml` first and run `make freeze`.
