@@ -1,0 +1,18 @@
+[project]
+name = "tickquery"
+version = "0.1.0"
+description = "Typed Python expression API for server-side DolphinDB tick-data queries"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pandas>=2.2",
+    "polars>=1.0",
+    "pyarrow>=14",
+]
+
+[project.optional-dependencies]
+dolphindb = ["dolphindb>=3.0.6.1"]
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
