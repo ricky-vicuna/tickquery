@@ -1,0 +1,29 @@
+name: Check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Ruff, Pyright and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.6"
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install locked dependencies
+        run: make init-dev
+      - name: Check formatting, lint and types
+        run: make check
+      - name: Unit tests (no database)
+        run: make test
+      - name: Build distributions
+        run: uv build
