@@ -1,0 +1,10 @@
+# Throwaway DolphinDB for `make test-ingestion` (Docker Desktop or OrbStack).
+# No volume: `docker compose down` deletes the container and all its data.
+# Separate project name and port, so it never touches a dev DolphinDB.
+name: tickquery-test
+services:
+  dolphindb:
+    image: dolphindb/dolphindb:v3.00.5
+    platform: linux/amd64
+    ports:
+      - "127.0.0.1:${DDB_TEST_PORT:-18848}:8848"

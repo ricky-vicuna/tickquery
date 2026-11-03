@@ -170,5 +170,93 @@ class OperationTests(unittest.TestCase):
         self.assertTrue(session.calls[1].startswith("undef("))
 
 
+class SafetyTests(unittest.TestCase):
+    """Mistakes that used to compile into a silently wrong query now fail early."""
+
+    def setUp(self) -> None:
+        self.session = RecordingSession()
+        self.trades = Query(self.session, "trades")
+        self.quotes = Query(self.session, "quotes")
+
+    def test_having_rejects_raw_aggregate(self) -> None:
+        totals = agg(group_by(self.trades, "symbol"), volume=col("size").sum())
+        with self.assertRaisesRegex(ValueError, "Aggregate inside a row filter"):
+            having(totals, col("size").sum() > 100)
+        with self.assertRaisesRegex(ValueError, "Aggregate inside a row filter"):
+            where(self.trades, count() > 1)
+
+    def test_agg_rejects_row_wise_columns(self) -> None:
+        with self.assertRaisesRegex(ValueError, "aggregate expressions"):
+            agg(group_by(self.trades, "symbol"), "size")
+        with self.assertRaisesRegex(ValueError, "Group key cannot be an aggregate"):
+            group_by(self.trades, col("size").sum())
+
+    def test_first_and_last_require_sorted_input(self) -> None:
+        with self.assertRaisesRegex(ValueError, "depend on row order"):
+            agg(group_by(self.trades, "symbol"), close=col("price").last())
+        sorted_then_grouped = agg(group_by(self.trades.sort("ts"), "symbol"), n=count())
+        with self.assertRaisesRegex(ValueError, "depend on row order"):
+            agg(group_by(sorted_then_grouped, "symbol"), close=col("n").last())
+        ok = agg(group_by(self.trades.sort("ts", "seq"), "symbol"), close=col("price").last())
+        self.assertIn("last(price) as close", ok.explain())
+
+    def test_sort_rejects_alias_and_aggregate(self) -> None:
+        with self.assertRaises(ValueError):
+            self.trades.sort(col("ts").bucket("1m").alias("minute"))
+        with self.assertRaises(ValueError):
+            self.trades.sort(col("size").sum())
+
+    def test_ohlcv_bar_plan(self) -> None:
+        bars = agg(
+            group_by(
+                self.trades.sort("ts", "seq"), "symbol", col("ts").bucket("1s").alias("bar_start")
+            ),
+            open=col("price").first(),
+            high=col("price").max(),
+            low=col("price").min(),
+            close=col("price").last(),
+            volume=col("size").sum(),
+        )
+        self.assertEqual(
+            bars.explain().splitlines()[-1],
+            "q_preview = select first(price) as open, max(price) as high, min(price) as low, "
+            "last(price) as close, sum(size) as volume from q_preview "
+            "group by symbol, bar(nanotimestamp(ts), 1s) as bar_start;",
+        )
+
+    def test_strict_asof_with_matched_time(self) -> None:
+        # Strict: a quote stamped exactly at the left time is not yet visible.
+        result = asof_join(
+            self.trades,
+            self.quotes,
+            on="ts",
+            by=["symbol"],
+            strict=True,
+            matched="quote_ts",
+            tie_break=["seq"],
+        )
+        self.assertEqual(
+            result.explain(),
+            "\n".join(
+                [
+                    "q_preview_r0 = select * from quotes order by symbol, ts, seq;",
+                    "q_preview_r0 = select *, ts as quote_ts from q_preview_r0;",
+                    "update q_preview_r0 set ts = ts + 1;",
+                    "q_preview = select * from aj(trades, q_preview_r0, `symbol`ts);",
+                ]
+            ),
+        )
+
+    def test_with_columns_needs_named_row_expressions(self) -> None:
+        self.assertEqual(
+            self.trades.with_columns(col("ts").bucket("1s").alias("bar_start")).explain(),
+            "q_preview = select *, bar(nanotimestamp(ts), 1s) as bar_start from trades;",
+        )
+        with self.assertRaises(ValueError):
+            self.trades.with_columns(col("ts").bucket("1s"))
+        with self.assertRaises(ValueError):
+            self.trades.with_columns(col("size").sum().alias("total"))
+
+
 if __name__ == "__main__":
     unittest.main()

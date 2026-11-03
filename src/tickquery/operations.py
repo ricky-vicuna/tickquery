@@ -9,6 +9,10 @@ def where(query: Query, *predicates: Expr) -> Query:
     return query.where(*predicates)
 
 
+def with_columns(query: Query, *items: Expr) -> Query:
+    return query.with_columns(*items)
+
+
 def group_by(query: Query, *keys: Columns) -> Grouped:
     return query.group_by(*keys)
 
@@ -29,5 +33,14 @@ def right_join(left: Query, right: Query, *, on: str | Sequence[str]) -> Query:
     return left.right_join(right, on=on)
 
 
-def asof_join(left: Query, right: Query, *, on: str, by: Sequence[str] = ()) -> Query:
-    return left.asof_join(right, on=on, by=by)
+def asof_join(
+    left: Query,
+    right: Query,
+    *,
+    on: str,
+    by: Sequence[str] = (),
+    strict: bool = False,
+    matched: str | None = None,
+    tie_break: Sequence[str] = (),
+) -> Query:
+    return left.asof_join(right, on=on, by=by, strict=strict, matched=matched, tie_break=tie_break)
